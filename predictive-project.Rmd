@@ -1,0 +1,567 @@
+---
+title: "Customer Delinquency Prediction"
+author: "Richard Acquah-Sarpong"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: tango
+    code_folding: hide
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=F,warning=F,echo=T,fig_height=7,fig_width=13, out.extra = "", fig.align= "center", fig.asp=0.7)
+
+```
+
+```{r, message=FALSE}
+#load libraries 
+library(ggplot2)
+library(earth)
+library(Rprofet)
+library(caret)
+library(readr)
+library(viridis)
+library(gridExtra)
+library(kableExtra)
+library(patchwork)
+library(ggeasy)
+library(GGally)
+library(ggsci)
+library(ROCR)
+library(tidyverse)
+
+```
+
+
+\newpage 
+
+![](/Users/kwabenasarpong/OneDrive/Projects/bad credit/ks.png)
+
+INTRODUCTION
+---------------------
+
+The aim of this project is to fit a logistic and MARS model using real accounts data from a credit card company in Sioux Falls, South Dakota for predicting if a customer is delinquent or not and determine which model performs best.  The concept of binning will be applied in this project. Binning is a way to group a number of more or less continuous values into a smaller number of “bins”. For example, if you have data about a group of people, you might want to arrange their ages into a smaller number of age intervals. The Multivariate adaptive regression splines (MARS) provide a convenient approach to capture the nonlinear relationships in the data by assessing cutpoints (knots) similar to step functions. The procedure assesses each data point for each predictor as a knot and creates a linear regression model with the candidate feature(s. Model comparison is done to compare the  predictive power of the models using Receiver Operator Characteristics curves(ROC) and the Kolmogorov-Smirnov (KS) statistic. 
+ 
+
+
+DATA & PRE-PROCESSING
+---------------------
+The dataset contains 6,237 observations and the nineteen (19) variables. The dependent variable ‘bad’ indicates the customer did not pay their bill and is now seriously delinquent(default) or not.
+
+Below is a summary of the 19 variables in the dataset. This does not include rows with missing values. The analysis that folows makes use of rows with complete data. rows with missing observations made up small portion (5.12%) of the total dataset therefore there were removed. Also, duplicated rows were removed from the dataset. The final dataset after the processing stage had 5916 observations with 18 predictors for customer delinquency.
+
+```{r}
+#load the data
+customerretentionMARS <- read_csv("customerretentionMARS.csv")
+
+#summary statistics
+summary.stats <- round(as.data.frame((customerretentionMARS)%>%
+                                       psych::describe(na.rm = F))%>%
+                         dplyr::select(n,mean, sd, median, min, max), 2)
+
+# Summary table
+kbl(summary.stats, caption="Summary of customer Retention Data")%>%
+  kable_classic(full_width = F, html_font = "Cambria", font_size = 12)
+```
+
+
+```{r}
+# how many  observations have missing values"
+missing <- sum(rowSums(is.na(customerretentionMARS))) #321 observations out of 6237
+
+#remove missing observations since there are only few (321)
+custRetention <- na.omit(customerretentionMARS)
+
+#remove duplicates rows if there are any
+custRetention=custRetention[which(!duplicated(custRetention$DebtDimId)),]
+```
+
+
+EXPLORATORY DATA ANALYSIS
+----------------------------------
+
+```{r, message=FALSE, fig.height=7, fig.width=13, fig.cap="Descriptive Graphs of selected varables"}
+
+#Setting theme for plots
+theme_set(theme_light(base_size = 10, base_family = "Arial Black"))
+ 
+#Violin dot plots 
+
+# defining the base and theme of the ggplot
+g <- ggplot(custRetention, aes(x=as.factor(Bad), y=Months_On_Book, color=as.factor(Bad))) + 
+  scale_color_aaas() + 
+  labs(x= "Months on Books", y= NULL) +
+  theme(legend.position = "none", 
+        axis.title = element_text(size = rel(0.8)),
+        axis.text = element_text(size=10, family = "Cochin"),
+        panel.grid = element_blank())
+
+#calculating average Month on Books for curves and annotation positions
+average_month1 <- mean(custRetention[custRetention$Bad==1,]$Months_On_Book)
+average_month2 <- mean(custRetention[custRetention$Bad==0,]$Months_On_Book)
+
+# Add violin plot
+gg <- g + geom_violin(size=2, alpha=0.25) +
+  stat_summary(fun = mean, geom="point", size = 5) + # add the mean as a dot plot \ then add the annotations
+  annotate(geom = "text", y =80, x=0.73, size = 3, color="brown", family="Cochin", label=glue::glue("Average\n{round(average_month2,2)}")) +
+   annotate(geom = "text", y =80, x=1.5, size = 3, color="brown", family="Cochin", label=glue::glue("Average\n{round(average_month1,2)}")) +
+  labs(title=("Violin-dot plot")) + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+#defining the position and directions of curves
+arrows <-
+  tibble(
+    x_start = c(0.73, 1.5),
+    x_end = c(1, 2),
+    y_start = c(73, 80),
+    y_end = c(average_month2, average_month1)
+  )
+
+#add curves to plot
+ ggbox <- gg +  geom_curve(
+    data = arrows, aes(x = x_start, y = y_start, xend = x_end, yend = y_end),
+    arrow = arrow(length = unit(0.07, "inch")), size = 0.4,
+    color = "gray20", curvature = -0.4
+  )
+
+############################ 
+creditLim_dist <- ggplot(custRetention, aes(x = Credit_Limit)) + 
+  geom_histogram(color = "white",fill= "firebrick3", binwidth = 50) + 
+  labs(x = "Credit Limit", 
+       y = "Frequency") +
+  scale_x_continuous(limits = c(0, 1250), expand = c(0.007, 0.005)) +
+    theme(legend.position = "none", 
+        axis.text = element_text(size=10, family ="Cochin"),
+        panel.grid = element_blank()) +
+   labs(title=("Histogram")) + 
+  theme(plot.title = element_text(hjust = 0.5))
+ 
+ 
+ utility_dist <- ggplot(custRetention, aes(x = Utility)) + 
+  geom_histogram(color = "white",fill= "firebrick3") + 
+  labs(x = "Utility", 
+       y = "Frequency") +
+  scale_x_continuous(limits = c(-0.5, 2)) +
+    theme(legend.position = "none", 
+        axis.text = element_text(size=10, family ="Cochin"),
+        panel.grid = element_blank()) +
+   
+   annotate(geom = "text", y=600, x=-0.2, size=4, color="brown", family="Cochin", label = glue::glue("negative values")) +
+   annotate(geom = "text", y=610, x=1.35, size=4, color="brown", family="Cochin", label = glue::glue("values greater \nthan 100%"))
+ 
+ hist_arror <- 
+   tibble(
+    x_start = c(-0.2, 1.2),
+    x_end = c(-0.2, 1.2),
+    y_start = c(550, 550),
+    y_end = c(100, 200))
+ 
+ utility_hist <- utility_dist + geom_curve(
+    data = hist_arror, aes(x = x_start, y = y_start, xend = x_end, yend = y_end),
+    arrow = arrow(length = unit(0.07, "inch")), size = 2,
+    color = "gray20", curvature = 0
+  )
+ 
+################################
+ 
+# defining the base and theme of the ggplot
+p <- ggplot(custRetention, aes(x=as.factor(Bad), y=Behavior_Score, color=as.factor(Bad))) + 
+  scale_color_aaas() + 
+  labs(x= "Behavior Score", y= NULL) +
+  theme(legend.position = "none", 
+        axis.title = element_text(size = rel(0.8)),
+        axis.text = element_text(size=10, family = "Cochin"),
+        panel.grid = element_blank())
+
+#calculating average Month on Books for curves and annotation positions
+average_behav1 <- mean(custRetention[custRetention$Bad==1,]$Behavior_Score)
+average_behav0 <- mean(custRetention[custRetention$Bad==0,]$Behavior_Score)
+
+# Add violin plot
+pp <- p + geom_violin(size=2, alpha=0.25) +
+  stat_summary(fun = mean, geom="point", size = 5) + # add the mean as a dot plot \ then add the annotations
+  annotate(geom = "text", y =705, x=1.5, size = 3, color="brown", family="Cochin", label=glue::glue("Average \n{round(average_behav0,2)}")) +
+   annotate(geom = "text", y =595, x=1.5, size = 3, color="brown", family="Cochin", label=glue::glue("Average \n{round(average_behav1,2)}"))
+
+#defining the position and directions of curves
+arrows2 <-
+  tibble(
+    x_start = c(1.5, 1.5),
+    x_end = c(1, 2),
+    y_start = c(700, 600),
+    y_end = c(average_behav0, average_behav1)
+  )
+
+#add curves to plot
+ ppbox <- pp +  geom_curve(
+    data = arrows2, aes(x = x_start, y = y_start, xend = x_end, yend = y_end),
+    arrow = arrow(length = unit(0.07, "inch")), size = 0.4,
+    color = "gray20", curvature = -0.4
+  )
+
+plot <- ((ggbox + creditLim_dist)) / ((ppbox + utility_hist))
+plot
+
+
+ggsave(filename = "credt.png",
+ width = 13, height = 8,
+ dpi = 700)  
+```
+
+
+The above data analysis suggests that on the average, bad customers(delinquent customers) have lower months on books as well as behavior scores compared to good customers. Revolving utilization(utility) is one indicator of how much a customer owes on the account. This rate ranges between 0 and 1 or 0 and 100%. The above histogram shows customers with negative and above 1 utility rates. This is unreasonable therefore its is important to perform some feature engineering on the utility variable. Simply, negative values will be replaced with 0 and values greater than 1 will be replaced with 1. 
+
+```{r}
+#replacing negative utility values with 0 and values over 1 with 1
+custRetention <- as.data.frame(custRetention%>%mutate(Utility=ifelse(Utility<0, 0, ifelse(Utility>1,1, Utility))))
+#Spliting data to train and test
+set.seed(222)
+index <- createDataPartition( y=custRetention$Bad, p = 0.6, list = F)
+train <- as.data.frame(custRetention[index, -1]%>%mutate(Bad=as.factor(Bad)))
+custRet_validate <- as.data.frame(custRetention[-index, ]%>%mutate(Bad=as.factor(Bad)))
+```
+
+
+
+
+VARIABLE SELECTION
+---------------------
+
+Feature selection, also known as variable selection, attribute selection or variable subset selection, is the process of selecting a subset of relevant features for use in model building. Having irrelevant features in the data can decrease the accuracy of the models and make the model learn based on irrelevant features. Below is a plot of the predictors in order of importance in predicting delinquency.
+
+```{r, warning=FALSE, fig.height=5}
+set.seed(202111)
+
+# prepare training scheme
+control <- trainControl(method="cv", number=10)
+# train the model
+model <- train(Bad~., data=train, method="lvq", preProcess="scale", trControl=control)
+# estimate variable importance
+importance <- varImp(model, scale=FALSE)
+# summarize importance
+#print(importance)
+importance_plot <- plot(importance)
+
+importance_plot
+
+```
+
+
+I use the Recursive Feature Elimination (RFE) method for selection of variables. This is a widely used algorithm for selecting features that are most relevant in predicting the target variable in a predictive model. RFE applies a backward selection process to find the optimal combination of features. Based on the cross-validation accuracy, 10 attributes are selected. The 10 features selected are Behavior_Score, Good_Customer_Score, Quarterly_Fico_Score, Credit_Limit"   Utility, Opening_Balance, Net_Purchases_During_Cycle, and Ending_Balance. I use these variables for both models after binnig.
+
+```{r, warning=FALSE, fig.height=5}
+# define the control using a random forest selection function
+control <- rfeControl(functions=rfFuncs, method="cv", number=5)
+# run the RFE algorithm
+results <- rfe(train[,1:17], train[, 18], sizes=c(1:10), rfeControl=control)
+# summarize the results
+var_select_plot <- plot(results, type=c("g", "o"))
+
+var_select_plot
+```
+
+Selected Variables
+
+```{r}
+predictors(results)
+```
+
+
+```{r}
+#Selecting important variables
+data <- as.data.frame(custRetention%>%
+  dplyr::select(DebtDimId, Bad, Behavior_Score, Good_Customer_Score, Quarterly_Fico_Score, Credit_Limit, Utility, Opening_Balance, Ending_Balance, Net_Purchases_During_Cycle, Net_Payments_During_Cycle, Months_On_Book))
+
+custRetention <- as.data.frame(custRetention%>%
+#  mutate(Bad=as.factor(Bad))%>%
+  dplyr::select(Bad, Behavior_Score, Good_Customer_Score, Quarterly_Fico_Score, Credit_Limit, Utility, Opening_Balance, Ending_Balance, Net_Purchases_During_Cycle, Net_Payments_During_Cycle, Months_On_Book))
+```
+
+
+BINNING OF VARIABLES
+-----------------------
+
+Binning is a good idea when there are discontinuity in the variable at the cut-points. Some continuos predictor variables used for building models  were binned. Binning is a way to group a number of more or less continuous values into a smaller number of “bins”. These continous variables now are treated as factor/categorical variables. Below is the visualisation of some binned continous predictors.
+
+
+```{r}
+#Binning of importanat variables 
+custRetention <- custRetention%>%
+  dplyr::mutate(Behavior_Score_Bins=cut(Behavior_Score, breaks=c(-Inf, 600, 670, Inf), right = F),
+         Good_Customer_Score_Bins=cut(Good_Customer_Score, breaks=c(-Inf,700,750,820,Inf), right = F),
+         Quarterly_Fico_Score_Bins=cut(Quarterly_Fico_Score, breaks=c(-Inf, 550, 650, 642,Inf), right = F),
+         Utility_Bins=cut(Utility, breaks=c(-Inf, 0, 0.5, 1, Inf), right = F),
+         Opening_Balance_Bins=cut(Opening_Balance, breaks=c(-Inf, 141, 228, 347, Inf), right = F),
+         Ending_Balance_Bins = cut(Ending_Balance, breaks =c(-Inf, 131, 242,299, Inf), right = F))%>%
+  dplyr::select(Bad, Behavior_Score_Bins, Good_Customer_Score_Bins, Quarterly_Fico_Score_Bins, Credit_Limit, Utility_Bins, Opening_Balance_Bins, Ending_Balance_Bins, Net_Purchases_During_Cycle, Net_Payments_During_Cycle, Months_On_Book)
+
+#Plot of bins
+
+WOEplotter(dat = custRetention, var = 'Behavior_Score_Bins', target = 'Bad')
+WOEplotter(dat = custRetention, var = 'Good_Customer_Score_Bins', target = 'Bad')
+WOEplotter(dat = custRetention, var = 'Quarterly_Fico_Score_Bins', target = 'Bad')
+WOEplotter(dat = custRetention, var = 'Utility_Bins', target = 'Bad')
+#WOEplotter(dat = custRetention, var = 'Opening_Balance_Bucket', target = 'Bad')
+#WOEplotter(dat = custRetention, var = 'Ending_Balance_Bucket', target = 'Bad')
+
+custRetention <- as.data.frame(custRetention)
+
+#custRetention
+
+
+```
+
+
+DATA PARTITIONING
+---------------------
+
+Separating data into training and validation sets is an important part of evaluating the models. 60% of the data is used for training models, and a 40% of the data is used for validation. The data is randomly sampled to help ensure that the validation and training sets are similar. By using similar data for training and validation, The effect of data discrepancies can be minimized and better understand the characteristics of the models.
+
+After the models have been trained by using the training set, the models are tested by making predictions against the validation set. Because the data in the validation set already contains known values for the response variable,Bad, it is easy to determine whether the models' guesses are correct or not.
+
+```{r}
+#Spliting data to train and test
+set.seed(222)
+index <- createDataPartition( y=custRetention$Bad, p = 0.6, list = F)
+custRet_train <- as.data.frame(custRetention[index, ]%>%mutate(Bad=as.factor(Bad)))
+custRet_validate <- as.data.frame(custRetention[-index, ]%>%mutate(Bad=as.factor(Bad)))
+
+
+#save data
+write.csv(custRet_train, "custRet_train.csv")
+write.csv(custRet_validate, "custRet_validate.csv")
+```
+
+
+
+MARS MODEL
+-----------------
+
+Total of 15 out of 18 variables entered the model. However, the model thinned the predictors and retained only 6 of them for the prediction.
+
+```{r}
+#Mars Model
+mars_model <- earth(Bad ~ ., 
+                    data = custRet_train, glm = list(family="binomial"), degree = 1)
+mars_sumary <- summary(mars_model)
+
+kable(mars_sumary$coefficients, 
+      caption="Summary of MARS model on Training Dataset")%>%
+  kable_classic(full_width = F, html_font = "Cambria", font_size = 12)
+
+kable(round(cbind(rss=mars_sumary$rss, 
+                  rsq=mars_sumary$rsq, 
+                  gcv=mars_sumary$gcv, 
+                  grsq=mars_sumary$grsq),3), 
+      caption="Mars Model Summary")%>%
+  kable_classic(full_width = F, html_font = "Cambria", font_size = 12)
+```
+
+**ROC for Mars Model**
+
+See "Interpretation of ROC Curve" section for interpretation
+```{r, fig.height=7, fig.width=13, fig.cap="ROC & AUC of MARS Model on training and validations data"}
+
+mars_prediction_train <- predict(mars_model, type = "response", newdata = custRet_train)
+mars_prediction_validate <- predict(mars_model, type = "response", newdata = custRet_validate)
+
+#on training dataset 
+my_predictions_marsT <- prediction(mars_prediction_train, custRet_train$Bad, label.ordering = NULL)
+roc_perfT <- performance(my_predictions_marsT, measure = "tpr", x.measure = "fpr")
+
+auc_perf_marsT <- performance(my_predictions_marsT, measure = "auc")
+auc_train <- as.numeric(auc_perf_marsT@y.values)
+
+
+my_predictions_mars <- prediction(mars_prediction_validate, custRet_validate$Bad, label.ordering = NULL)
+roc_perf <- performance(my_predictions_mars, measure = "tpr", x.measure = "fpr")
+
+#
+auc_perf_mars <- performance(my_predictions_mars, measure = "auc")
+auc_valid <- as.numeric(auc_perf_mars@y.values)
+
+#ROC Data
+roc_data <- as.data.frame(cbind(
+  trainx=roc_perfT@x.values[[1]],
+  trainy=roc_perfT@y.values[[1]],
+  validx=roc_perf@x.values[[1]],
+  validy=roc_perf@y.values[[1]]
+))
+#roc curve 
+mars_roc <- ggplot(roc_data) + 
+  geom_line(size=1, col="firebrick",aes(x=trainx, y=trainy)) + 
+  geom_line(size=1,col= "blue", aes(x=validx, y=validy)) + 
+  theme_minimal() + 
+  geom_abline(intercept = 0, linetype = "dashed", size=1) + 
+  annotate(geom = "text", y=1, x=0.15, size=6, color="brown", family="Cochin", label = glue::glue("Training AUC = {round(auc_train,2)}")) +
+  annotate(geom = "text", y=0.92, x=0.15, size=6, color="brown", family="Cochin", label = glue::glue("Validation AUC = {round(auc_valid,2)}")) + xlab("False Positive Rate") + ylab("True Positive Rate") + labs(title=("ROC for MARS Model (Traning vs Validation)")) + 
+  theme(plot.title = element_text(hjust = 0.5))
+mars_roc
+```
+
+
+LOGISTIC MODEL
+---------------------
+
+Logistic regression, also called a logit model, is used to model the dichotomous outcome of credit delinquency In the logit model the log odds of the outcome is modeled as a linear combination of the predictor variables.
+```{r}
+#---create logistic model------------
+
+log_model <- glm(Bad ~ ., data = custRet_train, family = "binomial")
+
+log_summary <- summary(log_model)
+
+
+#using only significant variables
+#log_model <- glm(Bad ~ Behavior_Score_Bins + Good_Customer_Score_Bins +  #Quarterly_Fico_Score_Bins + Net_Purchases_During_Cycle + Months_On_Book , data = #custRet_train, family = "binomial")
+
+kable(round(log_summary$coefficients,3), caption="Summary of Logistic Model on Training data")%>%
+  kable_classic(full_width = F, html_font = "Cambria", font_size = 12)
+```
+
+
+
+**ROC for Logistic Model**
+
+See "Interpretation of ROC Curves" section for interpretation
+
+```{r, fig.height=7, fig.width=13, fig.cap="ROC & AUC of Logistic Model on training and validations data"}
+#----predict from logistic model------
+
+
+#predict new values on training and validation dataset 
+log_prediction_train <- predict(log_model, type = "response", newdata = custRet_train)
+log_prediction_validate <- predict(log_model, type = "response", newdata = custRet_validate)
+
+#on training dataset 
+my_predictions_logT <- prediction(log_prediction_train, custRet_train$Bad, label.ordering = NULL)
+roc_perf_logT <- performance(my_predictions_logT, measure = "tpr", x.measure = "fpr")
+
+
+auc_perf_logT <- performance(my_predictions_logT, measure = "auc")
+log_auc_train <- as.numeric(auc_perf_logT@y.values)
+
+my_predictions_log <- prediction(log_prediction_validate, custRet_validate$Bad, label.ordering = NULL)
+roc_perf_log <- performance(my_predictions_log, measure = "tpr", x.measure = "fpr")
+
+
+auc_perf_log <- performance(my_predictions_log, measure = "auc")
+log_auc_valid <- as.numeric(auc_perf_log@y.values)
+
+
+#ROC Data
+roc_data_log <- as.data.frame(cbind(
+  trainx=roc_perf_logT@x.values[[1]],
+  trainy=roc_perf_logT@y.values[[1]],
+  validx=roc_perf_log@x.values[[1]],
+  validy=roc_perf_log@y.values[[1]]
+))
+#roc curve 
+logit_roc <- ggplot(roc_data_log) + 
+  geom_line(size=1, col="firebrick",aes(x=trainx, y=trainy)) + 
+  geom_line(size=1,col= "blue", aes(x=validx, y=validy)) + 
+  theme_minimal() + 
+  geom_abline(intercept = 0, linetype = "dashed", size=1) + 
+  annotate(geom = "text", y=1, x=0.15, size=6, color="brown", family="Cochin", label = glue::glue("Training AUC = {round(log_auc_train,2)}")) +
+  annotate(geom = "text", y=0.92, x=0.15, size=6, color="brown", family="Cochin", label = glue::glue("Validation AUC = {round(log_auc_valid,2)}")) + 
+  xlab("False Positive Rate") + 
+  ylab("True Positive Rate") + 
+  labs(title=("ROC for Logistic Model (Traning vs Validation)")) + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+logit_roc
+
+ggsave(filename = "roc.png",
+ width = 15, height = 8,
+ dpi = 700)
+```
+
+
+INTERPRETATION OF ROC CURVES
+------------------------------
+
+The ROC curve is created by evaluating the class probabilities for the model across a continuum of thresh- olds. For each candidate threshold, the resulting true-positive rate(sensitivity) and the false-positive rate (specificity) are plotted against each other. The figures above show the results of this process for the credit card data for two models; MARS and logistic. The ROC plots is a helpful tool for choosing the threshold that appropriately maximizes the trade-off between sensitivity and specificity. In comparing the two models with ROC curves, a perfect model would have a sensitivity and specificity of 100% - Graphically, the curve would be a single steep between (0,0) and (1,1) and remain constant from (0,1) to (1,1). The area under the curve (AUC) of such a perfect model would be equal to 1. An ineffective model will have its ROC curve that follows the 45 degrees diagonal line and would have an AUC of approximately 0.5. 
+
+ROC curves with corresponding AUC values are made from the training and validation datasets for each model. The two models are compared using ROC generated from the validation datasets. In comparing the logistic and the MARS model, ROC plots and AUC was generated from the validation dataset. It can be seen that the logistic model and the MARS model have the same AUC values therefore both models can be said to have the same predictive power in this case.
+
+
+
+
+THE KOLMOGOROV-SMIRNOV (KS) CURVE & STATISTIC
+----------------------------------------------
+
+The Kolmogorov-Smirnov (KS) statistic is a performance statistic which measures the discriminatory power of a model. It is the largest difference between the TPR and FPR at a given percentile. It looks at the maximum difference between the distribution of cumulative events and cumulative non-events. It is a very popular metric used in credit risk and response modeling. The Kolmogorov–Smirnov test a very eﬀicient way to determine if two samples are significantly different from each other. In predictive analytics, the test is used to determine if predictions from different models differ significantly from each other. **The higher the value, the better the model.**
+
+
+```{r, fig.height=7, fig.width=13}
+#----KS charts----
+
+test <- as.data.frame(cbind(roc_perf_log@x.values[[1]], roc_perf_log@y.values[[1]]))
+Percentile <- NULL
+Difference <- NULL 
+for (i in 1:nrow(test)){
+  test[i, 3] = i/nrow(test)
+  test[i, 4]= abs(test[i,2]-test[i,1])
+}
+colnames(test) <- c("FPR", "TPR", "Percentile", "Difference")
+
+#Row with the maximum difference
+max_diff <- test[test$Difference==max(test$Difference),]
+
+#Maximum Difference
+#max_diff$Difference
+
+logit_ks <- ggplot(test) + 
+  geom_line(aes(x=Percentile, y=TPR), col="firebrick", size=1) +
+  geom_line(aes(x=Percentile, y=FPR), col="blue", size=1) +
+  geom_abline(intercept = 0, linetype="dashed") +
+  geom_vline(xintercept = max_diff$Difference, linetype="dashed") +
+  labs(title = "KS Chart for Logit Predictions", y="TPR/FPR") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  annotate(geom = "text", y=0.92, x=max_diff$Difference, size=6, color="brown", family="Cochin", label = glue::glue("D = {round(max_diff$Difference,2)}"))
+
+
+test <- as.data.frame(cbind(roc_perf@x.values[[1]], roc_perf@y.values[[1]]))
+Percentile <- NULL
+Difference <- NULL 
+for (i in 1:nrow(test)){
+  test[i, 3] = i/nrow(test)
+  test[i, 4]= abs(test[i,2]-test[i,1])
+}
+colnames(test) <- c("FPR", "TPR", "Percentile", "Difference")
+
+
+max_diff <- test[test$Difference==max(test$Difference),]
+
+#Maximum Difference
+#max_diff$Difference
+
+mars_ks <- ggplot(test) + 
+  geom_line(aes(x=Percentile, y=TPR), col="firebrick", size=1) +
+  geom_line(aes(x=Percentile, y=FPR), col="blue", size=1) +
+  geom_abline(intercept = 0, linetype="dashed") +
+  geom_vline(xintercept = max_diff$Difference, linetype="dashed") +
+  labs(title = "KS Chart for MARS Predictions", y="TPR/FPR") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  annotate(geom = "text", y=0.92, x=max_diff$Difference, size=6, color="brown", family="Cochin", label = glue::glue("D = {round(max_diff$Difference,2)}"))
+
+
+((mars_ks + logit_ks))
+
+ggsave(filename = "ks.png",
+ width = 15, height = 8,
+ dpi = 700)
+```
+
+In this case, the Logistic Model has the largest KS statistic.. This means that the predictions of the Logistic model is significantly different than that of the MARS model. Therefore the logistic model provides a better model in terms of predictions. 
+
+
+
+CONCLUSION
+------------------
+The MARS and Logistic models are two good models in predicting customer deliquency. Even though the AUC of both models are equal, based on the KS statistic, the logistic model outperforms the MARS model since it has the highest value. 
+
+
